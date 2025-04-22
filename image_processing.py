@@ -9,7 +9,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from skimage.transform import resize
 from ultralytics import YOLO
-from segment_anything import sam_model_registry, SamPredictor
+# from segment_anything import sam_model_registry, SamPredictor
+from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 from segment_anything.utils.transforms import ResizeLongestSide
 
 # -----------------------------
@@ -27,7 +28,8 @@ model_yolo = YOLO('yolo11n-seg.pt')
 sam_checkpoint = "/Users/anneducroo/Library/CloudStorage/Dropbox/Mac (2)/Documents/PRINCETON/SPRING 2025/COS557/sam_vit_b_01ec64.pth"
 model_type = "vit_b"
 sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
-sam_predictor = SamPredictor(sam)
+# sam_predictor = SamPredictor(sam)
+mask_generator = SamAutomaticMaskGenerator(model=sam, points_per_side=16, stability_score_thresh=0.90)
 
 # -----------------------------
 # STEP 0: REMOVE MARKERS
@@ -161,12 +163,36 @@ def segment_image_yolo(img_rgb):
 # -----------------------------
 def segment_image_sam(img_rgb):
     '''
+    Segments image using Segment Anything Model (SAM) automatic mask generator.
+
+    img_rgb: RGB image
+
+    returns: segmented mask (same size as input)
+    '''
+    masks = mask_generator.generate(img_rgb)
+
+    # Create an empty RGB mask
+    overlay = np.zeros_like(img_rgb)
+
+    np.random.seed(42)
+    for i, mask_dict in enumerate(masks):
+        mask = mask_dict['segmentation']
+        color = np.random.randint(0, 255, size=(3,), dtype=np.uint8)
+        overlay[mask] = color
+
+    return overlay
+
+'''
+def segment_image_sam(img_rgb):
+'''
+'''
     Segments image using Segment Anything Model (SAM) with automatic point prompts.
 
     img_rgb: RGB image
 
     returns: segmented mask (same size as input)
     '''
+'''
 
     # Resize image for SAM input
     transformer = ResizeLongestSide(sam.image_encoder.img_size)
@@ -183,6 +209,7 @@ def segment_image_sam(img_rgb):
     input_labels = np.array([1])  # Positive point
 
     '''
+'''
     # binary mask (maybe not wanted)
     masks, _, _ = sam_predictor.predict(
         point_coords=input_points,
@@ -194,6 +221,7 @@ def segment_image_sam(img_rgb):
     segmented_mask = np.stack([mask]*3, axis=-1).astype(np.uint8) * 255
     '''
 
+'''
     # multi-class masks
     segmented_masks, scores, logits = sam_predictor.predict(
         point_coords=input_points,
@@ -202,6 +230,9 @@ def segment_image_sam(img_rgb):
     )
 
     return segmented_masks
+    '''
+'''
+'''
 
 # -----------------------------
 # IMAGE PROCESSING PIPELINE
@@ -251,6 +282,8 @@ def process_image(image_path, image_file, save_folder, use_sam=False, skip_prepr
     # segment image
     # choose segmentation model
     if use_sam:
+        '''
+        # this was for SamPredictor
         masks = segment_image_sam(img_normalized)
         
         # Color-overlay each mask (choose random colors)
@@ -267,6 +300,8 @@ def process_image(image_path, image_file, save_folder, use_sam=False, skip_prepr
         # Save overlaid mask image
         segmentation_path = os.path.join(save_folder, f"{image_file}_segmentation_mask.png")
         cv2.imwrite(segmentation_path, cv2.cvtColor(segmented_mask, cv2.COLOR_RGB2BGR))
+        '''
+        segmented_mask = segment_image_sam(img_normalized)
     else:
         segmented_mask = segment_image_yolo(img_normalized)
 
