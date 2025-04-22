@@ -1,4 +1,23 @@
 # -----------------------------
+# FUTURE STEPS (IDEAS)
+# -----------------------------
+# - denoising could be optimized
+#     --> parameters have just been chosen, could be better
+# - resizing
+#     --> do we want to smush everything into a square?
+#     --> should we 'randomly' cut a square from the image and then resize this square?
+# - order of operations?
+#     --> perhaps resizing is better after segmentation?
+#     --> i do think denoising and normalization should be done beforehand
+# - better remove text from images
+#     --> current marker removal kinda works ish
+#         --> perhaps run twice to get rid of residuals?
+# - see if there is a way to remove the background?
+#     --> right now the background sometimes gets segmented as well
+#         --> removing background could improve overall segmentation
+# - values for SAM could be optimized (just randomly chosen rn based on vibes)
+
+# -----------------------------
 # IMPORTS
 # -----------------------------
 import os
@@ -29,7 +48,7 @@ sam_checkpoint = "/Users/anneducroo/Library/CloudStorage/Dropbox/Mac (2)/Documen
 model_type = "vit_b"
 sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
 # sam_predictor = SamPredictor(sam)
-mask_generator = SamAutomaticMaskGenerator(model=sam, points_per_side=16, stability_score_thresh=0.90)
+mask_generator = SamAutomaticMaskGenerator(model=sam, points_per_side=16, stability_score_thresh=0.75)
 
 # -----------------------------
 # STEP 0: REMOVE MARKERS
@@ -94,9 +113,20 @@ def denoise_image(img, d=5, sigmaColor=25, sigmaSpace=25):
 # -----------------------------
 # STEP 2: NORMALIZATION
 # -----------------------------
-def normalize_and_resize(img_rgb, target_shape=(640, 640)):
+def normalize(img_rgb):
     '''
-    resizes images to target shape, then normalized pixel intensity using min-max normalization
+    normalizes pixel intensity using min-max normalization
+
+    img_rgb: image to be resized
+
+    returns: normalized image
+    '''
+    normalized = (img_rgb - img_rgb.min()) / (img_rgb.max() - img_rgb.min())
+    return np.clip(normalized, 0, 1)
+
+def resize(img_rgb, target_shape=(640, 640)):
+    '''
+    resizes images to target shape
 
     img_rgb: image to be resized
     target_shape: desired shape (size for YOLO model)
@@ -104,8 +134,7 @@ def normalize_and_resize(img_rgb, target_shape=(640, 640)):
     returns: resized image
     '''
     resized = resize(img_rgb, target_shape, preserve_range=True, anti_aliasing=False)
-    normalized = (resized - resized.min()) / (resized.max() - resized.min())
-    return normalized
+    return resized
 
 # -----------------------------
 # STEP 3: SEGMENTATION (YOLO)
@@ -271,8 +300,9 @@ def process_image(image_path, image_file, save_folder, use_sam=False, skip_prepr
         # denoise (on cleaned image)
         img_denoised = denoise_image(img_cleaned)
 
-        # normalize (on denoised image)
-        img_normalized = normalize_and_resize(img_denoised)
+        # normalize (on denoised image) (for now no resizing)
+        # img_resized = resize(img_denoised)
+        img_normalized = normalize(img_denoised)
 
         # save normalized image
         normalized_uint8 = (img_normalized * 255).astype(np.uint8)
@@ -301,8 +331,17 @@ def process_image(image_path, image_file, save_folder, use_sam=False, skip_prepr
         segmentation_path = os.path.join(save_folder, f"{image_file}_segmentation_mask.png")
         cv2.imwrite(segmentation_path, cv2.cvtColor(segmented_mask, cv2.COLOR_RGB2BGR))
         '''
-        segmented_mask = segment_image_sam(img_normalized)
+        # SAM expects uint8 RGB image in [0, 255] range
+
+        if img_normalized.dtype != np.uint8:
+            img_for_sam = (img_normalized * 255).astype(np.uint8)
+        else:
+            img_for_sam = img_normalized
+
+        segmented_mask = segment_image_sam(img_for_sam)
     else:
+        # YOLO
+        # can be either uint8 [0 255] or float32 [0, 1]
         segmented_mask = segment_image_yolo(img_normalized)
 
         # save segmented image (ensure it's in uint8 format before saving)
@@ -362,8 +401,7 @@ def main():
     df_ankle = df_labels[df_labels['type'] == 'XR ANKLE']
 
     for _, row in df_ankle.iterrows():
-        # right now, using sam on just original image (no denoising/normalization)
-        process_patient(row['patient_id'], base_dir, save_base_dir, use_sam=True, skip_preprocessing=True)
+        process_patient(row['patient_id'], base_dir, save_base_dir, use_sam=True, skip_preprocessing=False)
         print(f'images processed for patient {row['patient_id']}')
 
     print("All images processed.")
