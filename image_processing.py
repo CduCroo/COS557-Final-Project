@@ -3,11 +3,14 @@
 # -----------------------------
 import os
 import cv2
+import torch
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from skimage.transform import resize
 from ultralytics import YOLO
+from segment_anything import sam_model_registry, SamPredictor
+from segment_anything.utils.transforms import ResizeLongestSide
 
 # -----------------------------
 # CONFIGURATION
@@ -16,8 +19,15 @@ labels_path = '/Users/anneducroo/Library/CloudStorage/Dropbox/Mac (2)/Documents/
 base_dir = '/Users/anneducroo/Library/CloudStorage/Dropbox/Mac (2)/Documents/PRINCETON/SPRING 2025/COS557/Stanford LERA/leralowerextremityradiographs-6/LERA Dataset'
 save_base_dir = '/Users/anneducroo/Library/CloudStorage/Dropbox/Mac (2)/Documents/PRINCETON/SPRING 2025/COS557/Processed Images LERA'
 
-# Load YOLOv11 segmentation model
-model = YOLO('yolo11n-seg.pt')
+# load YOLOv11 segmentation model
+model_yolo = YOLO('yolo11n-seg.pt')
+
+# load SAM model
+# use base model (smallest)
+sam_checkpoint = "/Users/anneducroo/Library/CloudStorage/Dropbox/Mac (2)/Documents/PRINCETON/SPRING 2025/COS557/sam_vit_b_01ec64.pth"
+model_type = "vit_b"
+sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+sam_predictor = SamPredictor(sam)
 
 # -----------------------------
 # STEP 0: REMOVE MARKERS
@@ -96,9 +106,9 @@ def normalize_and_resize(img_rgb, target_shape=(640, 640)):
     return normalized
 
 # -----------------------------
-# STEP 3: SEGMENTATION
+# STEP 3: SEGMENTATION (YOLO)
 # -----------------------------
-def segment_image(img_rgb):
+def segment_image_yolo(img_rgb):
     '''
     segments image using pretrained YOLOv8 segmentation model
 
@@ -108,7 +118,7 @@ def segment_image(img_rgb):
     '''
     
     # run YOLO segmentation on the image
-    results = model(img_rgb)  # model assumed to be preloaded globally
+    results = model_yolo(img_rgb)  # model assumed to be preloaded globally
     
     for result in results:
         segmented_mask = None  # initialize placeholder
@@ -147,15 +157,64 @@ def segment_image(img_rgb):
         return segmented_mask
 
 # -----------------------------
+# STEP 3: SEGMENTATION (SAM)
+# -----------------------------
+def segment_image_sam(img_rgb):
+    '''
+    Segments image using Segment Anything Model (SAM) with automatic point prompts.
+
+    img_rgb: RGB image
+
+    returns: segmented mask (same size as input)
+    '''
+
+    # Resize image for SAM input
+    transformer = ResizeLongestSide(sam.image_encoder.img_size)
+    img_sam = transformer.apply_image(img_rgb)
+    img_tensor = sam_predictor.transform.apply_image(img_sam)
+    input_image = torch.as_tensor(img_tensor).permute(2, 0, 1).unsqueeze(0)
+
+    # Prepare predictor
+    sam_predictor.set_image(img_rgb)
+
+    # Sample 1–3 points around the center as positive prompts
+    h, w, _ = img_rgb.shape
+    input_points = np.array([[w // 2, h // 2]])  # Midpoint prompt
+    input_labels = np.array([1])  # Positive point
+
+    '''
+    # binary mask (maybe not wanted)
+    masks, _, _ = sam_predictor.predict(
+        point_coords=input_points,
+        point_labels=input_labels,
+        multimask_output=False,
+    )
+
+    mask = masks[0]  # Binary mask (H, W)
+    segmented_mask = np.stack([mask]*3, axis=-1).astype(np.uint8) * 255
+    '''
+
+    # multi-class masks
+    segmented_masks, scores, logits = sam_predictor.predict(
+        point_coords=input_points,
+        point_labels=input_labels,
+        multimask_output=True,  # <--- get more than one mask
+    )
+
+    return segmented_masks
+
+# -----------------------------
 # IMAGE PROCESSING PIPELINE
 # -----------------------------
-def process_image(image_path, image_file, save_folder):
+def process_image(image_path, image_file, save_folder, use_sam=False, skip_preprocessing=False):
     '''
     processes image (step 1-3)
 
     img_rgb: image to be processed
     image_file: name of the image file, used for saving masks
     save_folder: directory where the segmented image/mask is saved
+    use_sam: if True, use SAM instead of YOLO
+    skip_preprocessing: if True, skip denoising and normalization steps
 
     returns: processed image --> not doing this atm
     '''
@@ -169,31 +228,53 @@ def process_image(image_path, image_file, save_folder):
     # convert to rgb
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    # remove markers (on original image)
-    img_cleaned = remove_markers(img_rgb)
-
-    # denoise (on cleaned image)
-    img_denoised = denoise_image(img_cleaned)
-
-    # normalize (on denoised image)
-    img_normalized = normalize_and_resize(img_denoised)
-
     # ensure save folder exists
     os.makedirs(save_folder, exist_ok=True)
 
-    # save normalized image
-    normalized_uint8 = (img_normalized * 255).astype(np.uint8)
-    norm_path = os.path.join(save_folder, f"{image_file}_normalized.png")
-    cv2.imwrite(norm_path, cv2.cvtColor(normalized_uint8, cv2.COLOR_RGB2BGR))
+    if skip_preprocessing:
+        img_normalized = img_rgb
+    else:
+        # remove markers (on original image)
+        img_cleaned = remove_markers(img_rgb)
 
-    # segment image (on denoised and normalized image)
-    segmented_mask = segment_image(img_normalized)
+        # denoise (on cleaned image)
+        img_denoised = denoise_image(img_cleaned)
 
-    # save segmented image (ensure it's in uint8 format before saving)
-    if segmented_mask is not None:
-        segmented_mask_uint8 = (segmented_mask * 255).astype(np.uint8) if segmented_mask.dtype != np.uint8 else segmented_mask
+        # normalize (on denoised image)
+        img_normalized = normalize_and_resize(img_denoised)
+
+        # save normalized image
+        normalized_uint8 = (img_normalized * 255).astype(np.uint8)
+        norm_path = os.path.join(save_folder, f"{image_file}_normalized.png")
+        cv2.imwrite(norm_path, cv2.cvtColor(normalized_uint8, cv2.COLOR_RGB2BGR))
+
+    # segment image
+    # choose segmentation model
+    if use_sam:
+        masks = segment_image_sam(img_normalized)
+        
+        # Color-overlay each mask (choose random colors)
+        overlay = np.zeros_like(img_normalized)
+        np.random.seed(42)
+        colors = np.random.randint(0, 255, size=(len(masks), 3), dtype=np.uint8)
+
+        for i, mask in enumerate(masks):
+            for c in range(3):
+                overlay[..., c] += (mask.astype(np.uint8) * colors[i][c])
+
+        segmented_mask = np.clip(overlay, 0, 255).astype(np.uint8)
+
+        # Save overlaid mask image
         segmentation_path = os.path.join(save_folder, f"{image_file}_segmentation_mask.png")
-        cv2.imwrite(segmentation_path, segmented_mask_uint8)
+        cv2.imwrite(segmentation_path, cv2.cvtColor(segmented_mask, cv2.COLOR_RGB2BGR))
+    else:
+        segmented_mask = segment_image_yolo(img_normalized)
+
+        # save segmented image (ensure it's in uint8 format before saving)
+        if segmented_mask is not None:
+            segmented_mask_uint8 = (segmented_mask * 255).astype(np.uint8) if segmented_mask.dtype != np.uint8 else segmented_mask
+            segmentation_path = os.path.join(save_folder, f"{image_file}_segmentation_mask.png")
+            cv2.imwrite(segmentation_path, segmented_mask_uint8)
 
     # save comparison original vs. fully processed image
     if segmented_mask is not None:
@@ -202,7 +283,8 @@ def process_image(image_path, image_file, save_folder):
         axes[0].set_title(f'Original ({image_file})')
         axes[0].axis('off')
 
-        axes[1].imshow(segmented_mask, cmap='gray')
+        # axes[1].imshow(segmented_mask, cmap='gray')
+        axes[1].imshow(segmented_mask)
         axes[1].set_title(f'Mask ({image_file})')
         axes[1].axis('off')
 
@@ -213,13 +295,15 @@ def process_image(image_path, image_file, save_folder):
 # -----------------------------
 # PATIENT-LEVEL HANDLER
 # -----------------------------
-def process_patient(patient_id, base_path, save_base_path):
+def process_patient(patient_id, base_path, save_base_path, use_sam=False, skip_preprocessing=False):
     '''
     process each image for patient
 
     patient_id: patient identifier
     base_path: path to patient folders
     save_base_path: path where images are to be saved
+    use_sam: if True, use SAM instead of YOLO
+    skip_preprocessing: if True, skip denoising and normalization steps
     '''
     patient_folder = os.path.join(base_path, str(patient_id), 'ST-1')
     
@@ -233,7 +317,7 @@ def process_patient(patient_id, base_path, save_base_path):
 
     for image_file in image_files:
         image_path = os.path.join(patient_folder, image_file)
-        process_image(image_path, image_file, save_folder)
+        process_image(image_path, image_file, save_folder, use_sam=use_sam, skip_preprocessing=skip_preprocessing)
 
 # -----------------------------
 # DRIVER SCRIPT
@@ -243,7 +327,9 @@ def main():
     df_ankle = df_labels[df_labels['type'] == 'XR ANKLE']
 
     for _, row in df_ankle.iterrows():
-        process_patient(row['patient_id'], base_dir, save_base_dir)
+        # right now, using sam on just original image (no denoising/normalization)
+        process_patient(row['patient_id'], base_dir, save_base_dir, use_sam=True, skip_preprocessing=True)
+        print(f'images processed for patient {row['patient_id']}')
 
     print("All images processed.")
 
