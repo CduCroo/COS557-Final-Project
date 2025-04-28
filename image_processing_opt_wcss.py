@@ -289,7 +289,7 @@ def calculate_edge_preservation(img1, img2):
     correlation = np.corrcoef(grad1.flat, grad2.flat)[0, 1]
     return correlation
 
-def preprocess_with_optimization(img_rgb, save_folder, image_file, optimize=True):
+def preprocess_with_optimization(img_rgb, save_folder, image_file, optimize=True, opt_metric='edge_preservation'):
     '''
     Preprocesses image with optional parameter optimization, and saves intermediate steps
     
@@ -310,7 +310,7 @@ def preprocess_with_optimization(img_rgb, save_folder, image_file, optimize=True
     
     # Optimize denoising parameters if requested
     if optimize:
-        optimal_params = optimize_denoise_parameters(img_cleaned)
+        optimal_params = optimize_denoise_parameters(img_cleaned, metric=opt_metric)
         print(f"Optimal denoising parameters: {optimal_params}")
         
         img_denoised = denoise_image(img_cleaned, 
@@ -509,7 +509,7 @@ def segment_image_kmeans(img_rgb, max_clusters=10, max_iter=100, epsilon=1.0):
 # -----------------------------
 # IMAGE PROCESSING PIPELINE
 # -----------------------------
-def process_image(image_path, image_file, save_folder, segmentation_method='yolo', skip_preprocessing=False, max_kclusters=10, optimize_params=False):
+def process_image(image_path, image_file, save_folder, segmentation_method='yolo', opt_metric='edge_preservation', skip_preprocessing=False, max_kclusters=10, optimize_params=False):
     '''
     processes image (step 1-3)
     img_rgb: image to be processed
@@ -528,9 +528,6 @@ def process_image(image_path, image_file, save_folder, segmentation_method='yolo
     
     # convert to rgb
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    # Ensure dark background
-    img_rgb = background_dark(img_rgb)
     
     # ensure save folder exists
     os.makedirs(save_folder, exist_ok=True)
@@ -557,7 +554,7 @@ def process_image(image_path, image_file, save_folder, segmentation_method='yolo
         mask_save = segmented_mask if segmented_mask.dtype == np.uint8 else (segmented_mask * 255).astype(np.uint8)
         cv2.imwrite(os.path.join(save_folder, f"{image_file}_step3_{segmentation_method}_segmentation.png"), mask_save)
 
-def process_patient(patient_id, base_path, save_base_path, segmentation_method='yolo', skip_preprocessing=False, max_kclusters=10, optimize_params=False):
+def process_patient(patient_id, base_path, save_base_path, segmentation_method='yolo', opt_metric='edge_preservation', skip_preprocessing=False, max_kclusters=10, optimize_params=False):
     '''
     process each image for patient
     patient_id: patient identifier
@@ -594,6 +591,7 @@ def main():
         # Change 'sam' to 'kmeans' to use k-means segmentation instead
         process_patient(row['patient_id'], base_dir, save_base_dir, 
                        segmentation_method='kmeans',  # or 'yolo' or 'sam'
+                       opt_metric='edge_preservation',
                        skip_preprocessing=False, optimize_params=True,
                        max_kclusters=6)  # adjust number of clusters as needed
         print(f'Images processed for patient {row["patient_id"]}')
