@@ -276,8 +276,10 @@ def segment_image_sam(img_rgb):
 # -----------------------------
 # STEP 3: SEGMENTATION (K-MEANS)
 # -----------------------------
+'''
 def segment_image_kmeans(img_rgb, n_clusters=3, max_iter=100, epsilon=1.0):
     '''
+'''
     Segments image using K-means clustering.
     img_rgb: RGB image (0-255 or 0-1 range)
     n_clusters: number of clusters (segments) to create
@@ -285,7 +287,7 @@ def segment_image_kmeans(img_rgb, n_clusters=3, max_iter=100, epsilon=1.0):
     epsilon: termination criteria
     returns: segmented mask image (same size as input)
     '''
-
+'''
     # Convert to float32 and reshape for k-means
     if img_rgb.dtype != np.float32:
         # Check if image is in 0-1 range or 0-255 range
@@ -325,76 +327,106 @@ def segment_image_kmeans(img_rgb, n_clusters=3, max_iter=100, epsilon=1.0):
         mask[labels_2d == i] = np.random.randint(0, 255, size=3, dtype=np.uint8)
     
     return mask
-
-def determine_clusters_by_edge_information(img_rgb, min_clusters=2, max_clusters=8):
+'''
+def segment_image_kmeans(img_rgb, max_clusters=10, max_iter=100, epsilon=1.0):
     '''
-    Determines optimal number of clusters based on edge information in the image.
-    This is particularly useful for ankle X-rays where different structures 
-    (bones, soft tissue, background) have distinct boundaries.
-    
-    img_rgb: RGB image as numpy array
-    min_clusters: minimum number of clusters to consider
-    max_clusters: maximum number of clusters to consider
-    
-    returns: recommended number of clusters
+    Segments image using K-means clustering with adaptive cluster number selection.
+    img_rgb: RGB image (0-255 or 0-1 range)
+    max_clusters: maximum number of clusters to try
+    max_iter: maximum iterations for k-means
+    epsilon: termination criteria
+    returns: segmented mask image (same size as input)
     '''
-    # Convert to grayscale if needed
-    if len(img_rgb.shape) == 3:
-        gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+    # Convert to float32 and reshape for k-means
+    if img_rgb.dtype != np.float32:
+        # Check if image is in 0-1 range or 0-255 range
+        if img_rgb.max() <= 1.0:
+            data = img_rgb.astype(np.float32)
+        else:
+            data = img_rgb.astype(np.float32) / 255.0
     else:
-        gray = img_rgb.copy()
+        data = img_rgb.copy()
     
-    # Compute gradient magnitude using Sobel operators
-    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-    gradient_magnitude = np.sqrt(sobelx**2 + sobely**2)
+    # Reshape to 2D array of pixels (n_pixels, n_channels)
+    h, w, c = data.shape
+    reshaped_data = data.reshape((h * w, c))
     
-    # Normalize gradient magnitude to 0-255
-    gradient_magnitude = cv2.normalize(gradient_magnitude, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    # Define criteria for k-means
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, max_iter, epsilon)
     
-    # Apply threshold to get significant edges
-    _, binary_edges = cv2.threshold(gradient_magnitude, 50, 255, cv2.THRESH_BINARY)
+    # Find optimal number of clusters using elbow method
+    wcss = []  # Within-cluster sum of squares
+    n_clusters_range = range(2, max_clusters + 1)
     
-    # Find connected components (distinct regions)
-    num_labels, labels = cv2.connectedComponents(binary_edges)
+    for k in n_clusters_range:
+        _, labels, centers = cv2.kmeans(
+            reshaped_data,
+            k,
+            None,
+            criteria,
+            10,
+            cv2.KMEANS_RANDOM_CENTERS
+        )
+        
+        # Calculate WCSS (within-cluster sum of squares)
+        cluster_errors = np.zeros(k)
+        for i in range(k):
+            cluster_points = reshaped_data[labels.flatten() == i]
+            if len(cluster_points) > 0:  # Ensure cluster isn't empty
+                cluster_center = centers[i]
+                cluster_errors[i] = np.sum(np.square(cluster_points - cluster_center))
+        
+        wcss.append(np.sum(cluster_errors))
     
-    # Count significant components (filtering out small noise)
-    min_component_size = (gray.shape[0] * gray.shape[1]) // 500  # Adjust divisor as needed
-    significant_components = 0
+    # Determine optimal k using elbow method
+    # Calculate the gradient of the WCSS curve
+    gradients = np.diff(wcss)
+    # Calculate the second derivative (rate of change of gradient)
+    second_derivative = np.diff(gradients)
     
-    for i in range(1, num_labels):  # Skip background (0)
-        if np.sum(labels == i) > min_component_size:
-            significant_components += 1
+    # The optimal k is where the second derivative is at its maximum
+    # (adding 2 because we started from k=2 and need to account for diff operations)
+    if len(second_derivative) > 0:
+        optimal_k = np.argmax(np.abs(second_derivative)) + 3
+    else:
+        # Fallback if we don't have enough points for second derivative
+        optimal_k = np.argmin(np.abs(gradients)) + 3
     
-    # Use edge density to weight the number of clusters
-    edge_density = np.count_nonzero(binary_edges) / binary_edges.size
+    # Ensure optimal_k is within our range
+    optimal_k = max(2, min(optimal_k, max_clusters))
     
-    # Calculate recommended clusters
-    # More edges typically indicates more structures
-    recommended_clusters = min(max(min_clusters, 
-                                  int(min_clusters + (max_clusters - min_clusters) * edge_density * 2)), 
-                             max_clusters)
+    # Now run k-means with the optimal number of clusters
+    _, labels, centers = cv2.kmeans(
+        reshaped_data,
+        optimal_k,
+        None,
+        criteria,
+        10,
+        cv2.KMEANS_RANDOM_CENTERS
+    )
     
-    # Further adjust based on significant edge components
-    if significant_components > 0:
-        component_factor = min(significant_components / 10, 1.0)  # Scale factor
-        recommended_clusters = max(recommended_clusters, 
-                                 min(int(recommended_clusters + component_factor * 2), max_clusters))
+    # Convert back to uint8 image
+    centers = centers.astype(np.uint8) * 255 if data.max() <= 1.0 else centers.astype(np.uint8)
+    segmented_data = centers[labels.flatten()]
+    segmented_image = segmented_data.reshape((h, w, c))
     
-    return recommended_clusters
+    # Create a mask image (each cluster gets a different color)
+    mask = np.zeros((h, w, 3), dtype=np.uint8)
+    labels_2d = labels.reshape(h, w)
+    
+    # Assign different colors to different segments
+    np.random.seed(42)  # For reproducibility
+    for i in range(optimal_k):
+        mask[labels_2d == i] = np.random.randint(0, 255, size=3, dtype=np.uint8)
+    
+    print(f"Automatically selected {optimal_k} clusters for this image")
+    return mask
 
-def segment_image_kmeans_with_edge_detection(img_rgb, max_iter=100, epsilon=1.0):
-    # Determine optimal number of clusters using edge information
-    n_clusters = determine_clusters_by_edge_information(img_rgb)
-    print(f"Edge analysis recommends {n_clusters} clusters for this image")
-    
-    # Then proceed with k-means segmentation using this number
-    return segment_image_kmeans(img_rgb, n_clusters=n_clusters, max_iter=max_iter, epsilon=epsilon)
 
 # -----------------------------
 # IMAGE PROCESSING PIPELINE
 # -----------------------------
-def process_image(image_path, image_file, save_folder, segmentation_method='yolo', skip_preprocessing=False, n_clusters=3):
+def process_image(image_path, image_file, save_folder, segmentation_method='yolo', skip_preprocessing=False, max_kclusters=10):
     '''
     processes image (step 1-3)
     img_rgb: image to be processed
@@ -451,7 +483,7 @@ def process_image(image_path, image_file, save_folder, segmentation_method='yolo
             img_for_segmentation = img_normalized
         segmented_mask = segment_image_sam(img_for_segmentation)
     elif segmentation_method == 'kmeans':
-        segmented_mask = segment_image_kmeans(img_normalized, n_clusters=n_clusters)
+        segmented_mask = segment_image_kmeans(img_normalized, max_clusters=max_kclusters)
     else:  # default to YOLO
         segmented_mask = segment_image_yolo(img_normalized)
     
@@ -459,7 +491,7 @@ def process_image(image_path, image_file, save_folder, segmentation_method='yolo
         mask_save = segmented_mask if segmented_mask.dtype == np.uint8 else (segmented_mask * 255).astype(np.uint8)
         cv2.imwrite(os.path.join(save_folder, f"{image_file}_step3_{segmentation_method}_segmentation.png"), mask_save)
 
-def process_patient(patient_id, base_path, save_base_path, segmentation_method='yolo', skip_preprocessing=False, n_clusters=3):
+def process_patient(patient_id, base_path, save_base_path, segmentation_method='yolo', skip_preprocessing=False, max_kclusters=10):
     '''
     process each image for patient
     patient_id: patient identifier
@@ -483,7 +515,7 @@ def process_patient(patient_id, base_path, save_base_path, segmentation_method='
         process_image(image_path, image_file, save_folder, 
                      segmentation_method=segmentation_method, 
                      skip_preprocessing=skip_preprocessing,
-                     n_clusters=n_clusters)
+                     max_kclusters=max_kclusters)
 
 # -----------------------------
 # DRIVER SCRIPT
@@ -496,7 +528,8 @@ def main():
         # Change 'sam' to 'kmeans' to use k-means segmentation instead
         process_patient(row['patient_id'], base_dir, save_base_dir, 
                        segmentation_method='kmeans',  # or 'yolo' or 'sam'
-                       skip_preprocessing=False)
+                       skip_preprocessing=False,
+                       max_kclusters=6)  # adjust number of clusters as needed
         print(f'Images processed for patient {row["patient_id"]}')
     
     print("All images processed.")
