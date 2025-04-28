@@ -18,6 +18,16 @@
 # - values for SAM could be optimized (just randomly chosen rn based on vibes)
 
 # -----------------------------
+# LERA ANKLE PATIENTS WITH IMPLANTS/SCREWS
+# 1019
+# 1023
+# 1028
+# 1031
+# 1062
+# 1138
+# -----------------------------
+
+# -----------------------------
 # IMPORTS
 # -----------------------------
 import os
@@ -28,7 +38,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from skimage.transform import resize
 from ultralytics import YOLO
-# from segment_anything import sam_model_registry, SamPredictor
 from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 from segment_anything.utils.transforms import ResizeLongestSide
 
@@ -51,8 +60,60 @@ sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
 mask_generator = SamAutomaticMaskGenerator(model=sam, points_per_side=16, stability_score_thresh=0.75)
 
 # -----------------------------
-# STEP 0: REMOVE MARKERS
+# Save images for each step (True)
+# Should be false unless images are explicitly wanted
 # -----------------------------
+SAVE_INTERMEDIATE_STEPS = True
+
+# -----------------------------
+# STEP 0: MAKE BACKGROUND BLACK AND REMOVE MARKERS
+# -----------------------------
+def background_dark(img, threshold=127, sample_border=20):
+    '''
+    Ensures all images have a dark background by detecting the current background
+    and inverting if the background is light.
+    
+    img: RGB image as numpy array
+    threshold: brightness threshold to determine if background is light (0-255)
+    sample_border: number of pixels from border to sample for background detection
+    
+    returns: RGB image with dark background
+    '''
+    # Convert to grayscale if image is in RGB
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img.copy()
+    
+    # Sample the border pixels to determine background color
+    h, w = gray.shape
+    
+    # Create a border mask
+    border_mask = np.zeros_like(gray, dtype=bool)
+    border_mask[:sample_border, :] = True  # Top border
+    border_mask[-sample_border:, :] = True  # Bottom border
+    border_mask[:, :sample_border] = True  # Left border
+    border_mask[:, -sample_border:] = True  # Right border
+    
+    # Calculate average brightness of border pixels
+    border_pixels = gray[border_mask]
+    avg_brightness = np.mean(border_pixels)
+    
+    # Determine if background is light based on threshold
+    is_light_background = avg_brightness > threshold
+    
+    # If background is light, invert the image
+    if is_light_background:
+        if len(img.shape) == 3:
+            # For RGB image, invert each channel
+            return 255 - img
+        else:
+            # For grayscale image
+            return 255 - gray
+    else:
+        # Background is already dark, return original
+        return img
+
 def remove_markers(img, dark_thresh=50, bright_thresh=200, kernel_size=(5, 5)):
     '''
     Removes bright or dark markers depending on image background.
@@ -88,13 +149,12 @@ def remove_markers(img, dark_thresh=50, bright_thresh=200, kernel_size=(5, 5)):
 
     # Inpaint detected regions
     img_cleaned = cv2.inpaint(img, dilated, 3, cv2.INPAINT_TELEA)
-
     return img_cleaned
 
 # -----------------------------
 # STEP 1: DENOISING
 # -----------------------------
-def denoise_image(img, d=5, sigmaColor=25, sigmaSpace=25):
+def denoise_image(img, d=15, sigmaColor=50, sigmaSpace=50):
     '''
     Applies bilateral filtering to reduce noise while preserving edges.
     
@@ -125,6 +185,8 @@ def normalize(img_rgb):
     return np.clip(normalized, 0, 1)
 
 def resize(img_rgb, target_shape=(640, 640)):
+    ## CHANGE TO CROP
+    ## PERHAPS CHANGE TO ADDING UNTIL SQUARE
     '''
     resizes images to target shape
 
@@ -211,187 +273,249 @@ def segment_image_sam(img_rgb):
 
     return overlay
 
+# -----------------------------
+# STEP 3: SEGMENTATION (K-MEANS)
+# -----------------------------
 '''
-def segment_image_sam(img_rgb):
-'''
-'''
-    Segments image using Segment Anything Model (SAM) with automatic point prompts.
-
-    img_rgb: RGB image
-
-    returns: segmented mask (same size as input)
+def segment_image_kmeans(img_rgb, n_clusters=3, max_iter=100, epsilon=1.0):
     '''
 '''
-
-    # Resize image for SAM input
-    transformer = ResizeLongestSide(sam.image_encoder.img_size)
-    img_sam = transformer.apply_image(img_rgb)
-    img_tensor = sam_predictor.transform.apply_image(img_sam)
-    input_image = torch.as_tensor(img_tensor).permute(2, 0, 1).unsqueeze(0)
-
-    # Prepare predictor
-    sam_predictor.set_image(img_rgb)
-
-    # Sample 1–3 points around the center as positive prompts
-    h, w, _ = img_rgb.shape
-    input_points = np.array([[w // 2, h // 2]])  # Midpoint prompt
-    input_labels = np.array([1])  # Positive point
-
+    Segments image using K-means clustering.
+    img_rgb: RGB image (0-255 or 0-1 range)
+    n_clusters: number of clusters (segments) to create
+    max_iter: maximum iterations for k-means
+    epsilon: termination criteria
+    returns: segmented mask image (same size as input)
     '''
 '''
-    # binary mask (maybe not wanted)
-    masks, _, _ = sam_predictor.predict(
-        point_coords=input_points,
-        point_labels=input_labels,
-        multimask_output=False,
+    # Convert to float32 and reshape for k-means
+    if img_rgb.dtype != np.float32:
+        # Check if image is in 0-1 range or 0-255 range
+        if img_rgb.max() <= 1.0:
+            data = img_rgb.astype(np.float32)
+        else:
+            data = img_rgb.astype(np.float32) / 255.0
+    else:
+        data = img_rgb.copy()
+    
+    # Reshape to 2D array of pixels (n_pixels, n_channels)
+    h, w, c = data.shape
+    reshaped_data = data.reshape((h * w, c))
+    
+    # Define criteria and apply K-means
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, max_iter, epsilon)
+    _, labels, centers = cv2.kmeans(
+        reshaped_data, 
+        n_clusters, 
+        None, 
+        criteria, 
+        10, 
+        cv2.KMEANS_RANDOM_CENTERS
     )
-
-    mask = masks[0]  # Binary mask (H, W)
-    segmented_mask = np.stack([mask]*3, axis=-1).astype(np.uint8) * 255
-    '''
-
+    
+    # Convert back to uint8 image
+    centers = centers.astype(np.uint8) * 255 if data.max() <= 1.0 else centers.astype(np.uint8)
+    segmented_data = centers[labels.flatten()]
+    segmented_image = segmented_data.reshape((h, w, c))
+    
+    # Create a mask image (each cluster gets a different color)
+    mask = np.zeros((h, w, 3), dtype=np.uint8)
+    labels_2d = labels.reshape(h, w)
+    
+    # Assign different colors to different segments
+    for i in range(n_clusters):
+        mask[labels_2d == i] = np.random.randint(0, 255, size=3, dtype=np.uint8)
+    
+    return mask
 '''
-    # multi-class masks
-    segmented_masks, scores, logits = sam_predictor.predict(
-        point_coords=input_points,
-        point_labels=input_labels,
-        multimask_output=True,  # <--- get more than one mask
+def segment_image_kmeans(img_rgb, max_clusters=10, max_iter=100, epsilon=1.0):
+    '''
+    Segments image using K-means clustering with adaptive cluster number selection.
+    img_rgb: RGB image (0-255 or 0-1 range)
+    max_clusters: maximum number of clusters to try
+    max_iter: maximum iterations for k-means
+    epsilon: termination criteria
+    returns: segmented mask image (same size as input)
+    '''
+    # Convert to float32 and reshape for k-means
+    if img_rgb.dtype != np.float32:
+        # Check if image is in 0-1 range or 0-255 range
+        if img_rgb.max() <= 1.0:
+            data = img_rgb.astype(np.float32)
+        else:
+            data = img_rgb.astype(np.float32) / 255.0
+    else:
+        data = img_rgb.copy()
+    
+    # Reshape to 2D array of pixels (n_pixels, n_channels)
+    h, w, c = data.shape
+    reshaped_data = data.reshape((h * w, c))
+    
+    # Define criteria for k-means
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, max_iter, epsilon)
+    
+    # Find optimal number of clusters using elbow method
+    wcss = []  # Within-cluster sum of squares
+    n_clusters_range = range(2, max_clusters + 1)
+    
+    for k in n_clusters_range:
+        _, labels, centers = cv2.kmeans(
+            reshaped_data,
+            k,
+            None,
+            criteria,
+            10,
+            cv2.KMEANS_RANDOM_CENTERS
+        )
+        
+        # Calculate WCSS (within-cluster sum of squares)
+        cluster_errors = np.zeros(k)
+        for i in range(k):
+            cluster_points = reshaped_data[labels.flatten() == i]
+            if len(cluster_points) > 0:  # Ensure cluster isn't empty
+                cluster_center = centers[i]
+                cluster_errors[i] = np.sum(np.square(cluster_points - cluster_center))
+        
+        wcss.append(np.sum(cluster_errors))
+    
+    # Determine optimal k using elbow method
+    # Calculate the gradient of the WCSS curve
+    gradients = np.diff(wcss)
+    # Calculate the second derivative (rate of change of gradient)
+    second_derivative = np.diff(gradients)
+    
+    # The optimal k is where the second derivative is at its maximum
+    # (adding 2 because we started from k=2 and need to account for diff operations)
+    if len(second_derivative) > 0:
+        optimal_k = np.argmax(np.abs(second_derivative)) + 3
+    else:
+        # Fallback if we don't have enough points for second derivative
+        optimal_k = np.argmin(np.abs(gradients)) + 3
+    
+    # Ensure optimal_k is within our range
+    optimal_k = max(2, min(optimal_k, max_clusters))
+    
+    # Now run k-means with the optimal number of clusters
+    _, labels, centers = cv2.kmeans(
+        reshaped_data,
+        optimal_k,
+        None,
+        criteria,
+        10,
+        cv2.KMEANS_RANDOM_CENTERS
     )
+    
+    # Convert back to uint8 image
+    centers = centers.astype(np.uint8) * 255 if data.max() <= 1.0 else centers.astype(np.uint8)
+    segmented_data = centers[labels.flatten()]
+    segmented_image = segmented_data.reshape((h, w, c))
+    
+    # Create a mask image (each cluster gets a different color)
+    mask = np.zeros((h, w, 3), dtype=np.uint8)
+    labels_2d = labels.reshape(h, w)
+    
+    # Assign different colors to different segments
+    np.random.seed(42)  # For reproducibility
+    for i in range(optimal_k):
+        mask[labels_2d == i] = np.random.randint(0, 255, size=3, dtype=np.uint8)
+    
+    print(f"Automatically selected {optimal_k} clusters for this image")
+    return mask
 
-    return segmented_masks
-    '''
-'''
-'''
 
 # -----------------------------
 # IMAGE PROCESSING PIPELINE
 # -----------------------------
-def process_image(image_path, image_file, save_folder, use_sam=False, skip_preprocessing=False):
+def process_image(image_path, image_file, save_folder, segmentation_method='yolo', skip_preprocessing=False, max_kclusters=10):
     '''
     processes image (step 1-3)
-
     img_rgb: image to be processed
     image_file: name of the image file, used for saving masks
     save_folder: directory where the segmented image/mask is saved
-    use_sam: if True, use SAM instead of YOLO
+    segmentation_method: 'yolo', 'sam', or 'kmeans'
     skip_preprocessing: if True, skip denoising and normalization steps
-
+    kmeans_clusters: number of clusters for k-means segmentation
     returns: processed image --> not doing this atm
     '''
     img = cv2.imread(image_path)
-
     # ensure image is loaded correctly
     if img is None:
         print(f"[ERROR] Could not read {image_path}")
         return
-
+    
     # convert to rgb
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+    # Ensure dark background
+    img_rgb = background_dark(img_rgb)
+    
     # ensure save folder exists
     os.makedirs(save_folder, exist_ok=True)
-
+    
     if skip_preprocessing:
         img_normalized = img_rgb
     else:
         # remove markers (on original image)
         img_cleaned = remove_markers(img_rgb)
-
+        if SAVE_INTERMEDIATE_STEPS:
+            cv2.imwrite(os.path.join(save_folder, f"{image_file}_step0_markers_removed.png"), 
+                        cv2.cvtColor(img_cleaned, cv2.COLOR_RGB2BGR))
+        
         # denoise (on cleaned image)
         img_denoised = denoise_image(img_cleaned)
-
-        # normalize (on denoised image) (for now no resizing)
-        # img_resized = resize(img_denoised)
-        img_normalized = normalize(img_denoised)
-
-        # save normalized image
-        normalized_uint8 = (img_normalized * 255).astype(np.uint8)
-        norm_path = os.path.join(save_folder, f"{image_file}_normalized.png")
-        cv2.imwrite(norm_path, cv2.cvtColor(normalized_uint8, cv2.COLOR_RGB2BGR))
-
-    # segment image
-    # choose segmentation model
-    if use_sam:
-        '''
-        # this was for SamPredictor
-        masks = segment_image_sam(img_normalized)
+        if SAVE_INTERMEDIATE_STEPS:
+            cv2.imwrite(os.path.join(save_folder, f"{image_file}_step1_denoised.png"), 
+                        cv2.cvtColor(img_denoised, cv2.COLOR_RGB2BGR))
         
-        # Color-overlay each mask (choose random colors)
-        overlay = np.zeros_like(img_normalized)
-        np.random.seed(42)
-        colors = np.random.randint(0, 255, size=(len(masks), 3), dtype=np.uint8)
-
-        for i, mask in enumerate(masks):
-            for c in range(3):
-                overlay[..., c] += (mask.astype(np.uint8) * colors[i][c])
-
-        segmented_mask = np.clip(overlay, 0, 255).astype(np.uint8)
-
-        # Save overlaid mask image
-        segmentation_path = os.path.join(save_folder, f"{image_file}_segmentation_mask.png")
-        cv2.imwrite(segmentation_path, cv2.cvtColor(segmented_mask, cv2.COLOR_RGB2BGR))
-        '''
+        # normalize (on denoised image) (for now no resizing)
+        img_normalized = normalize(img_denoised)
+        if SAVE_INTERMEDIATE_STEPS:
+            normalized_uint8 = (img_normalized * 255).astype(np.uint8)
+            cv2.imwrite(os.path.join(save_folder, f"{image_file}_step2_normalized.png"), 
+                        cv2.cvtColor(normalized_uint8, cv2.COLOR_RGB2BGR))
+    
+    # Choose segmentation method
+    if segmentation_method == 'sam':
         # SAM expects uint8 RGB image in [0, 255] range
-
         if img_normalized.dtype != np.uint8:
-            img_for_sam = (img_normalized * 255).astype(np.uint8)
+            img_for_segmentation = (img_normalized * 255).astype(np.uint8)
         else:
-            img_for_sam = img_normalized
-
-        segmented_mask = segment_image_sam(img_for_sam)
-    else:
-        # YOLO
-        # can be either uint8 [0 255] or float32 [0, 1]
+            img_for_segmentation = img_normalized
+        segmented_mask = segment_image_sam(img_for_segmentation)
+    elif segmentation_method == 'kmeans':
+        segmented_mask = segment_image_kmeans(img_normalized, max_clusters=max_kclusters)
+    else:  # default to YOLO
         segmented_mask = segment_image_yolo(img_normalized)
+    
+    if SAVE_INTERMEDIATE_STEPS and segmented_mask is not None:
+        mask_save = segmented_mask if segmented_mask.dtype == np.uint8 else (segmented_mask * 255).astype(np.uint8)
+        cv2.imwrite(os.path.join(save_folder, f"{image_file}_step3_{segmentation_method}_segmentation.png"), mask_save)
 
-        # save segmented image (ensure it's in uint8 format before saving)
-        if segmented_mask is not None:
-            segmented_mask_uint8 = (segmented_mask * 255).astype(np.uint8) if segmented_mask.dtype != np.uint8 else segmented_mask
-            segmentation_path = os.path.join(save_folder, f"{image_file}_segmentation_mask.png")
-            cv2.imwrite(segmentation_path, segmented_mask_uint8)
-
-    # save comparison original vs. fully processed image
-    if segmented_mask is not None:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-        axes[0].imshow(img_rgb)
-        axes[0].set_title(f'Original ({image_file})')
-        axes[0].axis('off')
-
-        # axes[1].imshow(segmented_mask, cmap='gray')
-        axes[1].imshow(segmented_mask)
-        axes[1].set_title(f'Mask ({image_file})')
-        axes[1].axis('off')
-
-        plot_path = os.path.join(save_folder, f'{image_file}_comparison.png')
-        plt.savefig(plot_path)
-        plt.close()
-
-# -----------------------------
-# PATIENT-LEVEL HANDLER
-# -----------------------------
-def process_patient(patient_id, base_path, save_base_path, use_sam=False, skip_preprocessing=False):
+def process_patient(patient_id, base_path, save_base_path, segmentation_method='yolo', skip_preprocessing=False, max_kclusters=10):
     '''
     process each image for patient
-
     patient_id: patient identifier
     base_path: path to patient folders
     save_base_path: path where images are to be saved
-    use_sam: if True, use SAM instead of YOLO
+    segmentation_method: 'yolo', 'sam', or 'kmeans'
     skip_preprocessing: if True, skip denoising and normalization steps
+    kmeans_clusters: number of clusters for k-means segmentation (if used)
     '''
     patient_folder = os.path.join(base_path, str(patient_id), 'ST-1')
-    
     # ensure patient found
     if not os.path.isdir(patient_folder):
         print(f"[SKIP] Folder not found: {patient_folder}")
         return
-
+    
     save_folder = os.path.join(save_base_path, str(patient_id))
     image_files = [f for f in os.listdir(patient_folder) if f.endswith('.png')]
-
+    
     for image_file in image_files:
         image_path = os.path.join(patient_folder, image_file)
-        process_image(image_path, image_file, save_folder, use_sam=use_sam, skip_preprocessing=skip_preprocessing)
+        process_image(image_path, image_file, save_folder, 
+                     segmentation_method=segmentation_method, 
+                     skip_preprocessing=skip_preprocessing,
+                     max_kclusters=max_kclusters)
 
 # -----------------------------
 # DRIVER SCRIPT
@@ -399,11 +523,15 @@ def process_patient(patient_id, base_path, save_base_path, use_sam=False, skip_p
 def main():
     df_labels = pd.read_csv(labels_path, header=None, names=['patient_id', 'type', 'some_flag'])
     df_ankle = df_labels[df_labels['type'] == 'XR ANKLE']
-
+    
     for _, row in df_ankle.iterrows():
-        process_patient(row['patient_id'], base_dir, save_base_dir, use_sam=True, skip_preprocessing=False)
-        print(f'images processed for patient {row['patient_id']}')
-
+        # Change 'sam' to 'kmeans' to use k-means segmentation instead
+        process_patient(row['patient_id'], base_dir, save_base_dir, 
+                       segmentation_method='kmeans',  # or 'yolo' or 'sam'
+                       skip_preprocessing=False,
+                       max_kclusters=6)  # adjust number of clusters as needed
+        print(f'Images processed for patient {row["patient_id"]}')
+    
     print("All images processed.")
 
 if __name__ == '__main__':
